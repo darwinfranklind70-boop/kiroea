@@ -1,21 +1,30 @@
-# ProfitEdgeEA — Expert Advisor para MT5 (MQL5) — v2.0
+# ProfitEdgeEA — Expert Advisor para MT5 (MQL5) — v3.0
 
-EA de **seguimiento de tendencia multi-timeframe con entradas por confluencia** y
-**gestión de riesgo estricta basada en ATR**. Diseñado para ser optimizado y
-validado en el Strategy Tester de MetaTrader 5 sobre periodos largos.
+EA de tendencia multi-timeframe con **entradas por puntaje (scoring) tunable**,
+combinando **pullback + breakout**, y un **control de drawdown agresivo**.
+Diseñado para optimizar y validar en el Strategy Tester sobre periodos largos.
 
-## Novedades v2.0 (potenciado)
-- **Entradas por confluencia:** ahora exige varias confirmaciones obligatorias
-  (pullback + proximidad a EMA + momentum + vela con cuerpo fuerte + no
-  sobre-extensión) en vez del OR laxo de la v1 → menos señales, mejor calidad.
-- **Salidas parciales + runner:** cierra una parte (ej. 50%) en 1R, mueve a
-  break-even y deja correr el resto con trailing → *ganancias que corren,
-  pérdidas pequeñas*, justo el objetivo del sistema.
-- **Filtro de régimen de volatilidad:** compara el ATR con su media para evitar
-  mercados muertos o caóticos.
-- **Filtro de sobre-extensión:** no persigue el precio cuando ya está lejos de la EMA.
-- **Sesiones normalizadas a GMT** (Londres / NY / Asia) + **guarda de viernes**.
-- **Sizing por riesgo más robusto** con validación de margen libre.
+## Por qué v3.0 (corrige el backtest real)
+El backtest de la v1 mostró: beneficio +690% pero con **drawdown del 57%**,
+**profit factor 1.23** y un **R:R real de solo ~1.1** (el trailing cortaba
+ganadores demasiado pronto). La v2, al exigir *todas* las confirmaciones a la
+vez, operaba ~1 vez al mes. La v3 ataca ambos problemas:
+
+- **Entradas por SCORING:** cada confirmación (ADX, pullback, toque de EMA,
+  breakout, vela fuerte, giro de RSI) suma puntos. Entras si el puntaje supera
+  `InpMinScore`. **La frecuencia se controla con un solo dial** → ni demasiado
+  laxo (v1) ni demasiado restrictivo (v2).
+- **Pullback + Breakout:** captura retrocesos *y* arranques de tendencia
+  (aprovecha el movimiento desde que inicia).
+- **Control de drawdown** (lo que faltaba en v1):
+  - **DD Guard:** pausa el trading si el drawdown desde el pico supera un límite,
+    y reanuda al recuperarse.
+  - **Sizing defensivo:** reduce el riesgo tras rachas perdedoras consecutivas.
+  - **Filtro de curva de equity** (opcional): opera solo cuando el sistema está
+    "en forma" (su equity por encima de su media).
+- **R:R real mejor:** TP amplio (`InpTpRR=4`), parcial a 1.5R y trailing más
+  holgado (`InpTrailAtrMult=3`) para dejar correr de verdad a los ganadores.
+- **Salida por tiempo** opcional para liberar capital de trades estancados.
 
 > **Aviso honesto:** ningún sistema garantiza rentabilidad en Forex. Este EA
 > aporta un *edge* estadístico configurable y un control de riesgo riguroso
@@ -35,23 +44,28 @@ la probabilidad está a favor:
    - Filtro de **pendiente** de la EMA rápida (evita rangos planos).
    - Filtro de **fuerza ADX** (solo opera si hay tendencia real, ADX ≥ umbral).
 
-2. **Entrada por CONFLUENCIA (timeframe operativo, p. ej. H1/M15)**
-   Para entrar a favor de la tendencia exige **todas** estas condiciones (v2.0):
-   - **Pullback**: el RSI entró en zona de retroceso.
-   - **Proximidad**: el precio se acercó a la EMA dinámica (dentro de X·ATR).
-   - **No sobre-extensión**: el cierre no está demasiado lejos de la EMA.
-   - **Momentum**: vela que reanuda la dirección + RSI girando a favor.
-   - **Cuerpo fuerte**: el cierre queda en la parte alta/baja del rango de la vela.
+2. **Entrada por SCORING (timeframe operativo, p. ej. H1/M15)**
+   En vez de exigir *todas* las condiciones (v2, muy restrictivo) o solo una
+   (v1, muy laxo), cada confirmación **suma puntos** y entras si el total supera
+   `InpMinScore`. Confirmaciones (con su peso configurable):
+   - **ADX fuerte** (`InpWAdx`): hay tendencia real.
+   - **Pullback** (`InpWPullback`): el RSI entró en zona de retroceso.
+   - **Toque de EMA** (`InpWEmaTouch`): el precio se acercó a la EMA dinámica.
+   - **Breakout** (`InpWBreakout`): ruptura del máx/mín de N velas (arranque).
+   - **Vela fuerte** (`InpWCandle`): cierre en la parte alta/baja del rango.
+   - **Giro de RSI** (`InpWRsiTurn`): el RSI vuelve a favor de la tendencia.
 
-   Exigir varias confirmaciones a la vez reduce las señales de baja calidad.
+   **El dial `InpMinScore` controla la frecuencia**: más bajo = más trades,
+   más alto = menos pero de mayor calidad. *Gates* obligatorios: dirección de
+   la tendencia (TF superior), régimen de volatilidad y no sobre-extensión.
 
-3. **Riesgo, parciales y gestión (ATR)**
-   - **SL = k × ATR** → el stop se adapta a la volatilidad real del mercado.
-   - **TP del runner = RR × distancia del SL** → ratio riesgo/beneficio amplio.
-   - **Salida parcial**: cierra un % en 1R y pasa el resto a break-even.
-   - **Sizing por % de riesgo** con validación de margen libre.
-   - **Break-even** y **trailing stop** (ATR) para proteger y dejar correr.
-   - **Régimen de volatilidad**, **límite de pérdida diaria** y **máx. trades/día**.
+3. **Riesgo, parciales y control de drawdown (ATR)**
+   - **SL = k × ATR** y **TP del runner = RR × SL** (RR amplio, ej. 4).
+   - **Parcial** a 1.5R + break-even, runner con **trailing holgado** (3×ATR)
+     para dejar correr (ataca el R:R real de ~1.1 de la v1).
+   - **DD Guard**: pausa el trading si el drawdown desde el pico supera el límite.
+   - **Sizing defensivo**: reduce el riesgo tras rachas perdedoras.
+   - **Filtro de curva de equity** (opcional), límite diario y máx. trades/día.
 
 ### La matemática del edge
 Con un ratio riesgo/beneficio `RR` y un porcentaje de acierto `W`, la esperanza
@@ -91,27 +105,31 @@ rentable si el `RR` es suficientemente alto.
 | | `InpMaxSpreadPoints` | No opera si el spread supera este valor |
 | | `InpMaxPositions` | Posiciones simultáneas máximas |
 | Timeframes | `InpTrendTF` / `InpEntryTF` | TF de tendencia y de entrada |
-| Tendencia | `InpEmaFast` / `InpEmaSlow` | EMAs de tendencia (50 / 200) |
-| | `InpUseAdxFilter` / `InpAdxMin` | Filtro de fuerza de tendencia |
-| Entrada | `InpRsiPeriod` / `InpRsiBuyPullback` / `InpRsiSellPullback` | Zona de pullback |
-| | `InpPullbackEmaPeriod` / `InpEntryProxATR` | EMA dinámica y proximidad (×ATR) |
-| | `InpUseCandleFilter` / `InpCandleBodyFrac` | Vela de confirmación con cuerpo fuerte |
-| Régimen | `InpUseVolRegime` / `InpAtrAvgPeriod` | Filtro de volatilidad (ATR vs media) |
+| Tendencia (gate) | `InpEmaFast` / `InpEmaSlow` | EMAs de tendencia (50 / 200) |
+| | `InpUseSlopeFilter` / `InpSlopeLookback` | Pendiente de la EMA rápida |
+| **Scoring** | **`InpMinScore`** | **DIAL DE FRECUENCIA: puntaje mínimo para entrar** |
+| | `InpAdxMin` / `InpWAdx` | ADX y su peso |
+| | `InpRsiBuyPullback` / `InpRsiSellPullback` / `InpWPullback` | Pullback y peso |
+| | `InpPullbackEmaPeriod` / `InpEntryProxATR` / `InpWEmaTouch` | Toque de EMA y peso |
+| | `InpBreakoutBars` / `InpWBreakout` | Ruptura (Donchian) y peso |
+| | `InpCandleBodyFrac` / `InpWCandle` | Vela fuerte y peso |
+| | `InpWRsiTurn` | Peso del giro de RSI |
+| Régimen (gate) | `InpUseVolRegime` / `InpAtrAvgPeriod` | Filtro de volatilidad (ATR vs media) |
 | | `InpAtrMinFactor` / `InpAtrMaxFactor` | Rango de volatilidad permitido |
 | | `InpUseOverextension` / `InpMaxExtensionATR` | Evitar perseguir el precio |
-| Riesgo | `InpSlAtrMult` | SL = mult × ATR |
-| | `InpTpRR` | TP del runner = RR × distancia del SL |
-| | `InpUseRiskPercent` / `InpRiskPercent` | Riesgo % por operación |
-| | `InpFixedLot` | Lote fijo (si no se usa % de riesgo) |
-| Parciales | `InpUsePartial` / `InpPartialAtR` / `InpPartialPercent` | Salida parcial en 1R |
-| | `InpBEAfterPartial` | Pasar a break-even tras el parcial |
-| Gestión | `InpUseBreakEven` / `InpBreakEvenAtR` | Mover a break-even |
-| | `InpUseTrailing` / `InpTrailAtrMult` / `InpTrailStartAtR` | Trailing stop |
+| Riesgo | `InpSlAtrMult` / `InpTpRR` | SL = mult×ATR, TP runner = RR×SL |
+| | `InpUseRiskPercent` / `InpRiskPercent` / `InpFixedLot` | Tamaño de posición |
+| Salidas | `InpUsePartial` / `InpPartialAtR` / `InpPartialPercent` | Parcial (ej. 50% en 1.5R) |
+| | `InpBEAfterPartial` / `InpBreakEvenLockPts` | Break-even tras parcial |
+| | `InpUseTrailing` / `InpTrailAtrMult` / `InpTrailStartAtR` | Trailing del runner |
+| | `InpMaxBarsInTrade` | Salida por tiempo (0 = off) |
+| **Drawdown** | **`InpUseDDGuard` / `InpMaxDDPercent` / `InpDDResumeFactor`** | **Pausa por drawdown** |
+| | `InpLossRiskDecay` / `InpMaxDecaySteps` | Sizing defensivo tras rachas |
+| | `InpUseEquityFilter` / `InpEqMaPeriod` | Filtro de curva de equity |
 | Sesión | `InpUseSession` / `InpBrokerGMTOffset` | Sesiones en GMT |
 | | `InpTradeLondon` / `InpTradeNewYork` / `InpTradeAsia` | Sesiones activas |
 | | `InpAvoidFridayLate` / `InpFridayStopHourGMT` | Guarda de viernes |
-| Límites | `InpUseDailyLossLimit` / `InpDailyLossPercent` | Stop diario |
-| | `InpMaxTradesPerDay` | Máx. operaciones por día |
+| Límites | `InpUseDailyLossLimit` / `InpDailyLossPercent` / `InpMaxTradesPerDay` | Límites diarios |
 
 ---
 
@@ -137,14 +155,22 @@ rentable si el `RR` es suficientemente alto.
   busca *mesetas* de robustez (zonas amplias donde el sistema sigue siendo rentable).
 - Valida en **varios pares** y en **datos out-of-sample**.
 
-### Sugerencia de rangos de optimización
+### Orden sugerido de optimización (v3)
+1. **Primero el dial de frecuencia y el RR** (los de mayor impacto):
+
 | Parámetro | Inicio | Paso | Fin |
 |-----------|--------|------|-----|
-| `InpSlAtrMult` | 1.0 | 0.2 | 3.0 |
-| `InpTpRR` | 1.5 | 0.2 | 3.5 |
-| `InpAdxMin` | 15 | 2 | 30 |
-| `InpRsiBuyPullback` | 35 | 5 | 50 |
-| `InpEmaFast` | 20 | 10 | 60 |
+| `InpMinScore` | 1.5 | 0.5 | 5.0 |
+| `InpTpRR` | 2.0 | 0.5 | 6.0 |
+| `InpSlAtrMult` | 1.2 | 0.2 | 3.0 |
+
+2. **Luego los pesos y umbrales** del scoring (`InpWBreakout`, `InpWPullback`,
+   `InpAdxMin`, `InpRsiBuyPullback`, `InpBreakoutBars`).
+3. **Por último el control de drawdown** (`InpMaxDDPercent`, `InpLossRiskDecay`)
+   y los parámetros de salida (`InpPartialAtR`, `InpTrailAtrMult`).
+
+> Apunta a **profit factor > 1.4** y **drawdown < 25%** con > 150 operaciones.
+> El objetivo es subir el ratio retorno/drawdown (Calmar), no solo el beneficio.
 
 ---
 
