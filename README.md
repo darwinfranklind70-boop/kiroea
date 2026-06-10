@@ -1,8 +1,21 @@
-# ProfitEdgeEA — Expert Advisor para MT5 (MQL5)
+# ProfitEdgeEA — Expert Advisor para MT5 (MQL5) — v2.0
 
-EA de **seguimiento de tendencia multi-timeframe con entradas por pullback** y
+EA de **seguimiento de tendencia multi-timeframe con entradas por confluencia** y
 **gestión de riesgo estricta basada en ATR**. Diseñado para ser optimizado y
 validado en el Strategy Tester de MetaTrader 5 sobre periodos largos.
+
+## Novedades v2.0 (potenciado)
+- **Entradas por confluencia:** ahora exige varias confirmaciones obligatorias
+  (pullback + proximidad a EMA + momentum + vela con cuerpo fuerte + no
+  sobre-extensión) en vez del OR laxo de la v1 → menos señales, mejor calidad.
+- **Salidas parciales + runner:** cierra una parte (ej. 50%) en 1R, mueve a
+  break-even y deja correr el resto con trailing → *ganancias que corren,
+  pérdidas pequeñas*, justo el objetivo del sistema.
+- **Filtro de régimen de volatilidad:** compara el ATR con su media para evitar
+  mercados muertos o caóticos.
+- **Filtro de sobre-extensión:** no persigue el precio cuando ya está lejos de la EMA.
+- **Sesiones normalizadas a GMT** (Londres / NY / Asia) + **guarda de viernes**.
+- **Sizing por riesgo más robusto** con validación de margen libre.
 
 > **Aviso honesto:** ningún sistema garantiza rentabilidad en Forex. Este EA
 > aporta un *edge* estadístico configurable y un control de riesgo riguroso
@@ -22,21 +35,23 @@ la probabilidad está a favor:
    - Filtro de **pendiente** de la EMA rápida (evita rangos planos).
    - Filtro de **fuerza ADX** (solo opera si hay tendencia real, ADX ≥ umbral).
 
-2. **Entrada por pullback (timeframe operativo, p. ej. H1/M15)**
-   - Espera un **retroceso** (RSI en zona de pullback o toque de una EMA dinámica)
-     *a favor de la tendencia* — comprar barato en alza, vender caro en baja.
-   - Confirmación de **momentum** (vela que reanuda la dirección + RSI girando).
-   - Esto evita "perseguir" el precio y mejora el ratio riesgo/beneficio.
+2. **Entrada por CONFLUENCIA (timeframe operativo, p. ej. H1/M15)**
+   Para entrar a favor de la tendencia exige **todas** estas condiciones (v2.0):
+   - **Pullback**: el RSI entró en zona de retroceso.
+   - **Proximidad**: el precio se acercó a la EMA dinámica (dentro de X·ATR).
+   - **No sobre-extensión**: el cierre no está demasiado lejos de la EMA.
+   - **Momentum**: vela que reanuda la dirección + RSI girando a favor.
+   - **Cuerpo fuerte**: el cierre queda en la parte alta/baja del rango de la vela.
 
-3. **Riesgo y gestión (ATR)**
+   Exigir varias confirmaciones a la vez reduce las señales de baja calidad.
+
+3. **Riesgo, parciales y gestión (ATR)**
    - **SL = k × ATR** → el stop se adapta a la volatilidad real del mercado.
-   - **TP = RR × distancia del SL** → ratio riesgo/beneficio positivo (p. ej. 2.2:1),
-     clave matemática para que un acierto compense varias pérdidas.
-   - **Sizing por % de riesgo**: cada operación arriesga un % fijo del balance,
-     calculando el lote a partir de la distancia del SL (riesgo monetario constante).
-   - **Break-even** y **trailing stop** para proteger ganancias.
-   - **Límite de pérdida diaria** y **máximo de operaciones por día** para evitar
-     rachas destructivas.
+   - **TP del runner = RR × distancia del SL** → ratio riesgo/beneficio amplio.
+   - **Salida parcial**: cierra un % en 1R y pasa el resto a break-even.
+   - **Sizing por % de riesgo** con validación de margen libre.
+   - **Break-even** y **trailing stop** (ATR) para proteger y dejar correr.
+   - **Régimen de volatilidad**, **límite de pérdida diaria** y **máx. trades/día**.
 
 ### La matemática del edge
 Con un ratio riesgo/beneficio `RR` y un porcentaje de acierto `W`, la esperanza
@@ -79,17 +94,24 @@ rentable si el `RR` es suficientemente alto.
 | Tendencia | `InpEmaFast` / `InpEmaSlow` | EMAs de tendencia (50 / 200) |
 | | `InpUseAdxFilter` / `InpAdxMin` | Filtro de fuerza de tendencia |
 | Entrada | `InpRsiPeriod` / `InpRsiBuyPullback` / `InpRsiSellPullback` | Zona de pullback |
-| | `InpPullbackEmaPeriod` | EMA dinámica del retroceso |
-| | `InpRequireMomentum` | Exigir confirmación de momentum |
+| | `InpPullbackEmaPeriod` / `InpEntryProxATR` | EMA dinámica y proximidad (×ATR) |
+| | `InpUseCandleFilter` / `InpCandleBodyFrac` | Vela de confirmación con cuerpo fuerte |
+| Régimen | `InpUseVolRegime` / `InpAtrAvgPeriod` | Filtro de volatilidad (ATR vs media) |
+| | `InpAtrMinFactor` / `InpAtrMaxFactor` | Rango de volatilidad permitido |
+| | `InpUseOverextension` / `InpMaxExtensionATR` | Evitar perseguir el precio |
 | Riesgo | `InpSlAtrMult` | SL = mult × ATR |
-| | `InpTpRR` | TP = RR × distancia del SL |
+| | `InpTpRR` | TP del runner = RR × distancia del SL |
 | | `InpUseRiskPercent` / `InpRiskPercent` | Riesgo % por operación |
 | | `InpFixedLot` | Lote fijo (si no se usa % de riesgo) |
+| Parciales | `InpUsePartial` / `InpPartialAtR` / `InpPartialPercent` | Salida parcial en 1R |
+| | `InpBEAfterPartial` | Pasar a break-even tras el parcial |
 | Gestión | `InpUseBreakEven` / `InpBreakEvenAtR` | Mover a break-even |
 | | `InpUseTrailing` / `InpTrailAtrMult` / `InpTrailStartAtR` | Trailing stop |
+| Sesión | `InpUseSession` / `InpBrokerGMTOffset` | Sesiones en GMT |
+| | `InpTradeLondon` / `InpTradeNewYork` / `InpTradeAsia` | Sesiones activas |
+| | `InpAvoidFridayLate` / `InpFridayStopHourGMT` | Guarda de viernes |
 | Límites | `InpUseDailyLossLimit` / `InpDailyLossPercent` | Stop diario |
 | | `InpMaxTradesPerDay` | Máx. operaciones por día |
-| | `InpUseTimeFilter` / `InpStartHour` / `InpEndHour` | Filtro de sesión |
 
 ---
 

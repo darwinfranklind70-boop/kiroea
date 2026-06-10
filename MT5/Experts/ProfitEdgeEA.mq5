@@ -1,22 +1,23 @@
 //+------------------------------------------------------------------+
 //|                                                 ProfitEdgeEA.mq5  |
-//|   Multi-Timeframe Trend + Pullback EA con gestion de riesgo ATR   |
+//|   v2.0 - Multi-Timeframe Trend + Pullback con confluencia,        |
+//|   salidas parciales (runner), filtros de regimen y sesion GMT.    |
 //|                                                                  |
-//|   Metodologia:                                                   |
-//|   1) Tendencia en timeframe superior (EMA rapida vs lenta +      |
-//|      pendiente + filtro de fuerza ADX).                          |
-//|   2) Entrada en timeframe operativo por pullback (RSI) con       |
-//|      confirmacion de momentum y alineacion con la tendencia.     |
-//|   3) Riesgo definido por ATR: SL = k*ATR, TP = RR*SL.            |
-//|   4) Sizing por % de riesgo, break-even, trailing y limites      |
-//|      diarios de perdida / numero de operaciones.                 |
+//|   MEJORAS v2.0 respecto a v1:                                    |
+//|   - Entradas por CONFLUENCIA (varias confirmaciones obligatorias)|
+//|     en lugar de un OR laxo -> menos senales, mejor calidad.       |
+//|   - Salidas PARCIALES: cierra parte en 1R, mueve a break-even y   |
+//|     deja correr el resto con trailing (ganancias que corren).     |
+//|   - Filtro de REGIMEN de volatilidad (ATR vs su media).           |
+//|   - Filtro de SOBRE-EXTENSION (no perseguir precio lejos de EMA). |
+//|   - SESIONES normalizadas a GMT + guarda de viernes.              |
+//|   - Sizing por % de riesgo mas robusto (validaciones de margen).  |
 //|                                                                  |
-//|   NOTA: Ningun sistema garantiza rentabilidad. Este EA aporta    |
-//|   un edge estadistico configurable + control estricto de riesgo. |
-//|   Optimiza y valida con backtests largos y walk-forward.         |
+//|   NOTA: Ningun sistema garantiza rentabilidad. Optimiza y valida  |
+//|   walk-forward con costes reales por par y periodo.               |
 //+------------------------------------------------------------------+
 #property copyright "ProfitEdgeEA"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -25,60 +26,78 @@
 
 //============================ INPUTS ================================
 input group "=== General ==="
-input long     InpMagic            = 20260610;   // Numero magico (identifica este EA)
+input long     InpMagic            = 20260610;     // Numero magico (identifica este EA)
 input string   InpComment          = "ProfitEdge"; // Comentario de las ordenes
-input int      InpMaxSpreadPoints  = 30;          // Spread maximo permitido (puntos)
-input int      InpMaxPositions     = 1;           // Posiciones simultaneas maximas
+input int      InpMaxSpreadPoints  = 25;           // Spread maximo permitido (puntos)
+input int      InpMaxPositions     = 1;            // Posiciones simultaneas maximas
+input bool     InpOnePerBar        = true;         // Maximo una entrada por vela del TF operativo
 
 input group "=== Timeframes ==="
-input ENUM_TIMEFRAMES InpTrendTF    = PERIOD_H4;  // Timeframe de tendencia (superior)
-input ENUM_TIMEFRAMES InpEntryTF    = PERIOD_H1;  // Timeframe de entrada (operativo)
+input ENUM_TIMEFRAMES InpTrendTF    = PERIOD_H4;   // Timeframe de tendencia (superior)
+input ENUM_TIMEFRAMES InpEntryTF    = PERIOD_H1;   // Timeframe de entrada (operativo)
 
 input group "=== Filtro de Tendencia (TF superior) ==="
-input int      InpEmaFast          = 50;          // EMA rapida (tendencia)
-input int      InpEmaSlow          = 200;         // EMA lenta (tendencia)
-input bool     InpUseSlopeFilter   = true;        // Exigir pendiente de la EMA rapida
-input int      InpSlopeLookback    = 3;           // Velas para medir pendiente
-input bool     InpUseAdxFilter     = true;        // Usar filtro de fuerza ADX
-input int      InpAdxPeriod        = 14;          // Periodo ADX
-input double   InpAdxMin           = 22.0;        // ADX minimo para operar
+input int      InpEmaFast          = 50;           // EMA rapida (tendencia)
+input int      InpEmaSlow          = 200;          // EMA lenta (tendencia)
+input bool     InpUseSlopeFilter   = true;         // Exigir pendiente de la EMA rapida
+input int      InpSlopeLookback    = 3;            // Velas para medir pendiente
+input bool     InpUseAdxFilter     = true;         // Usar filtro de fuerza ADX
+input int      InpAdxPeriod        = 14;           // Periodo ADX
+input double   InpAdxMin           = 22.0;         // ADX minimo para operar
 
-input group "=== Entrada (TF operativo) ==="
-input int      InpRsiPeriod        = 14;          // Periodo RSI
-input double   InpRsiBuyPullback   = 45.0;        // RSI por debajo de esto = pullback en alza
-input double   InpRsiSellPullback  = 55.0;        // RSI por encima de esto = pullback en baja
-input int      InpPullbackEmaPeriod= 20;          // EMA dinamica del pullback (TF operativo)
-input bool     InpRequireMomentum  = true;        // Exigir vela de confirmacion de momentum
+input group "=== Entrada por Confluencia (TF operativo) ==="
+input int      InpRsiPeriod        = 14;           // Periodo RSI
+input double   InpRsiBuyPullback   = 45.0;         // RSI por debajo de esto = pullback en alza
+input double   InpRsiSellPullback  = 55.0;         // RSI por encima de esto = pullback en baja
+input int      InpPullbackEmaPeriod= 20;           // EMA dinamica del pullback (TF operativo)
+input double   InpEntryProxATR     = 0.50;         // Proximidad a la EMA dinamica (mult. de ATR)
+input bool     InpUseCandleFilter  = true;         // Exigir vela de confirmacion con cuerpo fuerte
+input double   InpCandleBodyFrac   = 0.50;         // Cierre en el % superior/inferior del rango
+
+input group "=== Filtro de Regimen / Volatilidad ==="
+input bool     InpUseVolRegime     = true;         // Filtrar por regimen de volatilidad (ATR vs media)
+input int      InpAtrAvgPeriod     = 50;           // Periodo de la media de ATR
+input double   InpAtrMinFactor     = 0.70;         // ATR debe ser >= factor * media (evita mercado muerto)
+input double   InpAtrMaxFactor     = 2.50;         // ATR debe ser <= factor * media (evita caos)
+input bool     InpUseOverextension = true;         // Evitar perseguir precio lejos de la EMA dinamica
+input double   InpMaxExtensionATR  = 2.0;          // Distancia maxima precio-EMA (mult. de ATR)
 
 input group "=== Gestion de Riesgo (ATR) ==="
-input int      InpAtrPeriod        = 14;          // Periodo ATR (TF operativo)
-input double   InpSlAtrMult        = 1.8;         // SL = mult * ATR
-input double   InpTpRR             = 2.2;         // TP = RR * (distancia del SL)
-input bool     InpUseRiskPercent   = true;        // Sizing por % de riesgo
-input double   InpRiskPercent      = 1.0;         // Riesgo por operacion (% del balance)
-input double   InpFixedLot         = 0.10;        // Lote fijo (si no se usa % de riesgo)
+input int      InpAtrPeriod        = 14;           // Periodo ATR (TF operativo)
+input double   InpSlAtrMult        = 1.8;          // SL = mult * ATR
+input double   InpTpRR             = 3.0;          // TP del runner = RR * (distancia del SL)
+input bool     InpUseRiskPercent   = true;         // Sizing por % de riesgo
+input double   InpRiskPercent      = 1.0;          // Riesgo por operacion (% del balance)
+input double   InpFixedLot         = 0.10;         // Lote fijo (si no se usa % de riesgo)
 
-input group "=== Gestion de la Posicion ==="
-input bool     InpUseBreakEven     = true;        // Activar break-even
-input double   InpBreakEvenAtR     = 1.0;         // Mover a BE cuando profit >= R (multiplos de riesgo)
-input double   InpBreakEvenLockPts = 5.0;         // Puntos asegurados al hacer BE
-input bool     InpUseTrailing      = true;        // Activar trailing stop
-input double   InpTrailAtrMult     = 2.0;         // Distancia del trailing = mult * ATR
-input double   InpTrailStartAtR    = 1.2;         // Iniciar trailing cuando profit >= R
+input group "=== Salidas Parciales + Runner ==="
+input bool     InpUsePartial       = true;         // Cerrar parte de la posicion en el primer objetivo
+input double   InpPartialAtR       = 1.0;          // Tomar parcial cuando profit >= R (multiplos de riesgo)
+input double   InpPartialPercent   = 50.0;         // % del volumen a cerrar en el parcial
+input bool     InpBEAfterPartial   = true;         // Mover a break-even tras el parcial
 
-input group "=== Filtros de Sesion y Limites ==="
-input bool     InpUseTimeFilter    = false;       // Filtrar por horas (hora del servidor)
-input int      InpStartHour        = 7;           // Hora inicio (incl.)
-input int      InpEndHour          = 20;          // Hora fin (excl.)
-input bool     InpUseDailyLossLimit= true;        // Limite de perdida diaria
-input double   InpDailyLossPercent = 3.0;         // Perdida diaria maxima (% del balance)
-input int      InpMaxTradesPerDay  = 5;           // Operaciones maximas por dia (0 = sin limite)
-input bool     InpOnePerBar        = true;        // Maximo una entrada por vela del TF operativo
+input group "=== Break-even y Trailing ==="
+input bool     InpUseBreakEven     = true;         // Activar break-even
+input double   InpBreakEvenAtR     = 1.0;          // Mover a BE cuando profit >= R
+input double   InpBreakEvenLockPts = 5.0;          // Puntos asegurados al hacer BE
+input bool     InpUseTrailing      = true;         // Activar trailing stop
+input double   InpTrailAtrMult     = 2.0;          // Distancia del trailing = mult * ATR
+input double   InpTrailStartAtR    = 1.2;          // Iniciar trailing cuando profit >= R
+
+input group "=== Sesion (GMT) y Limites ==="
+input bool     InpUseSession       = false;        // Filtrar por sesiones (horas GMT)
+input int      InpBrokerGMTOffset  = 2;            // Offset del servidor respecto a GMT (ej. GMT+2 -> 2)
+input bool     InpTradeLondon      = true;         // Operar sesion de Londres (07-16 GMT)
+input bool     InpTradeNewYork     = true;         // Operar sesion de Nueva York (12-21 GMT)
+input bool     InpTradeAsia        = false;        // Operar sesion asiatica (23-08 GMT)
+input bool     InpAvoidFridayLate  = true;         // Evitar abrir el viernes a ultima hora
+input int      InpFridayStopHourGMT= 20;           // Hora GMT a partir de la cual no abrir el viernes
+input bool     InpUseDailyLossLimit= true;         // Limite de perdida diaria
+input double   InpDailyLossPercent = 3.0;          // Perdida diaria maxima (% del balance)
+input int      InpMaxTradesPerDay  = 5;            // Operaciones maximas por dia (0 = sin limite)
 
 //============================ GLOBALS ==============================
 CTrade         trade;
-CPositionInfo  posInfo;
-CSymbolInfo    symInfo;
 
 int hEmaFastT, hEmaSlowT, hAdxT;          // handles TF tendencia
 int hRsiE, hEmaPullE, hAtrE;              // handles TF entrada
@@ -86,23 +105,27 @@ int hRsiE, hEmaPullE, hAtrE;              // handles TF entrada
 double g_point;
 int    g_digits;
 
-datetime g_lastBarTime = 0;               // control "una por vela"
-datetime g_dayStart    = 0;               // inicio del dia actual
-double   g_dayStartEquity = 0.0;          // equity al inicio del dia
-int      g_tradesToday  = 0;              // operaciones abiertas hoy
-bool     g_tradingBlockedToday = false;   // bloqueo por limite diario
+datetime g_lastBarTime = 0;
+datetime g_dayStart    = 0;
+double   g_dayStartEquity = 0.0;
+int      g_tradesToday  = 0;
+bool     g_tradingBlockedToday = false;
 
-//+------------------------------------------------------------------+
-//| OnInit                                                           |
+// Estado por posicion (para parciales/BE/trailing con referencia de riesgo estable)
+struct PosState
+{
+   ulong  ticket;
+   double openPrice;
+   double riskDist;       // distancia de riesgo inicial (open -> SL inicial)
+   double initialVolume;  // volumen original al abrir
+   bool   partialDone;
+   bool   beDone;
+};
+PosState g_pos[];
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(!symInfo.Name(_Symbol))
-   {
-      Print("Error: no se pudo inicializar el simbolo.");
-      return(INIT_FAILED);
-   }
-
    g_point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
@@ -111,12 +134,10 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetMarginMode();
 
-   // Handles TF tendencia
    hEmaFastT = iMA(_Symbol, InpTrendTF, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
    hEmaSlowT = iMA(_Symbol, InpTrendTF, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
    hAdxT     = iADX(_Symbol, InpTrendTF, InpAdxPeriod);
 
-   // Handles TF entrada
    hRsiE     = iRSI(_Symbol, InpEntryTF, InpRsiPeriod, PRICE_CLOSE);
    hEmaPullE = iMA(_Symbol, InpEntryTF, InpPullbackEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
    hAtrE     = iATR(_Symbol, InpEntryTF, InpAtrPeriod);
@@ -129,12 +150,9 @@ int OnInit()
    }
 
    ResetDailyCounters();
-
    return(INIT_SUCCEEDED);
 }
 
-//+------------------------------------------------------------------+
-//| OnDeinit                                                         |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
@@ -147,17 +165,12 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| OnTick                                                           |
-//+------------------------------------------------------------------+
 void OnTick()
 {
-   // Control de cambio de dia (resetea contadores y equity de referencia)
    HandleNewDay();
-
-   // Gestion de posiciones abiertas (BE / trailing) en cada tick
+   SyncPositionStates();
    ManageOpenPositions();
 
-   // Solo evaluamos entradas en el cierre de una vela del TF operativo
    datetime curBar = (datetime)SeriesInfoInteger(_Symbol, InpEntryTF, SERIES_LASTBAR_DATE);
    bool newBar = (curBar != g_lastBarTime);
    if(newBar)
@@ -166,16 +179,13 @@ void OnTick()
    if(InpOnePerBar && !newBar)
       return;
 
-   // Verificaciones previas (filtros globales)
    if(!PassGlobalFilters())
       return;
 
-   // Si ya hay el maximo de posiciones, no abrimos mas
    if(CountOwnPositions() >= InpMaxPositions)
       return;
 
-   // Senal
-   int signal = GetSignal(); // +1 compra, -1 venta, 0 nada
+   int signal = GetSignal();
    if(signal == 0)
       return;
 
@@ -183,50 +193,88 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Filtros globales (spread, sesion, limite diario)                 |
+//| Filtros globales: spread, sesion GMT, viernes, limites diarios   |
 //+------------------------------------------------------------------+
 bool PassGlobalFilters()
 {
    if(g_tradingBlockedToday)
       return(false);
 
-   // Limite de operaciones por dia
    if(InpMaxTradesPerDay > 0 && g_tradesToday >= InpMaxTradesPerDay)
       return(false);
 
-   // Spread
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(spread > InpMaxSpreadPoints)
       return(false);
 
-   // Filtro horario
-   if(InpUseTimeFilter)
-   {
-      MqlDateTime dt;
-      TimeToStruct(TimeCurrent(), dt);
-      if(InpStartHour <= InpEndHour)
-      {
-         if(dt.hour < InpStartHour || dt.hour >= InpEndHour)
-            return(false);
-      }
-      else // ventana que cruza medianoche
-      {
-         if(dt.hour < InpStartHour && dt.hour >= InpEndHour)
-            return(false);
-      }
-   }
+   if(!PassSessionFilter())
+      return(false);
 
    return(true);
 }
 
 //+------------------------------------------------------------------+
-//| Determina la senal combinando tendencia + pullback + momentum    |
+//| Sesiones en GMT + guarda de viernes                              |
+//+------------------------------------------------------------------+
+bool PassSessionFilter()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   // Hora GMT = hora del servidor - offset del servidor respecto a GMT
+   int gmtHour = (dt.hour - InpBrokerGMTOffset + 24) % 24;
+
+   // Guarda de viernes a ultima hora (dia 5 = viernes)
+   if(InpAvoidFridayLate && dt.day_of_week == 5 && gmtHour >= InpFridayStopHourGMT)
+      return(false);
+
+   if(!InpUseSession)
+      return(true);
+
+   bool inSession = false;
+   if(InpTradeLondon  && InHourRange(gmtHour, 7, 16))  inSession = true;
+   if(InpTradeNewYork && InHourRange(gmtHour, 12, 21)) inSession = true;
+   if(InpTradeAsia    && InHourRange(gmtHour, 23, 8))  inSession = true; // cruza medianoche
+
+   return(inSession);
+}
+
+bool InHourRange(int hour, int startH, int endH)
+{
+   if(startH <= endH)
+      return(hour >= startH && hour < endH);
+   // rango que cruza medianoche (ej. 23 -> 8)
+   return(hour >= startH || hour < endH);
+}
+
+//+------------------------------------------------------------------+
+//| Senal por confluencia: tendencia + regimen + pullback + trigger  |
 //+------------------------------------------------------------------+
 int GetSignal()
 {
-   // NOTA de indexacion: usamos arrays como serie temporal (ArraySetAsSeries),
-   // por lo que el indice 0 = vela en formacion, 1 = ultima vela CERRADA, 2 = previa.
-   // La barra de senal es la ultima cerrada (indice 1), coherente con iClose(.,1).
+   // Indexacion en serie temporal: 0 = vela en formacion, 1 = ultima cerrada, 2 = previa.
+
+   // ---- ATR (TF operativo) ----
+   int atrNeed = MathMax(2, InpAtrAvgPeriod + 2);
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(hAtrE, 0, 0, atrNeed, atr) < atrNeed) return(0);
+   double atrVal = atr[1];
+   if(atrVal <= 0) return(0);
+
+   // ---- Filtro de regimen de volatilidad ----
+   if(InpUseVolRegime)
+   {
+      double sum = 0.0;
+      for(int i = 1; i <= InpAtrAvgPeriod; i++)
+         sum += atr[i];
+      double atrAvg = sum / InpAtrAvgPeriod;
+      if(atrAvg > 0)
+      {
+         if(atrVal < InpAtrMinFactor * atrAvg) return(0); // mercado demasiado plano
+         if(atrVal > InpAtrMaxFactor * atrAvg) return(0); // volatilidad extrema/caotica
+      }
+   }
 
    // ---- Tendencia (TF superior) ----
    int needT = MathMax(2, InpSlopeLookback + 2);
@@ -251,14 +299,13 @@ int GetSignal()
       double adx[];
       ArraySetAsSeries(adx, true);
       if(CopyBuffer(hAdxT, 0, 0, 2, adx) < 2) return(0);
-      if(adx[1] < InpAdxMin)
-         return(0);
+      if(adx[1] < InpAdxMin) return(0);
    }
 
    if(!upTrend && !downTrend)
       return(0);
 
-   // ---- Pullback + momentum (TF operativo) ----
+   // ---- Datos del TF operativo ----
    double rsi[];
    ArraySetAsSeries(rsi, true);
    if(CopyBuffer(hRsiE, 0, 0, 3, rsi) < 3) return(0);
@@ -267,27 +314,42 @@ int GetSignal()
    ArraySetAsSeries(emaPull, true);
    if(CopyBuffer(hEmaPullE, 0, 0, 2, emaPull) < 2) return(0);
 
-   // Precios: indice 1 = ultima vela cerrada, indice 2 = previa
+   double open1  = iOpen(_Symbol, InpEntryTF, 1);
    double close1 = iClose(_Symbol, InpEntryTF, 1);
    double close2 = iClose(_Symbol, InpEntryTF, 2);
    double low1   = iLow(_Symbol, InpEntryTF, 1);
    double high1  = iHigh(_Symbol, InpEntryTF, 1);
-   if(close1==0.0 || close2==0.0) return(0);
+   if(close1==0.0 || close2==0.0 || high1<=low1) return(0);
 
+   double range = high1 - low1;
+
+   // ---- CONFLUENCIA de compra ----
    if(upTrend)
    {
-      // Hubo pullback: RSI bajo en la vela de senal o el minimo toco la EMA dinamica
-      bool pullback = (rsi[1] < InpRsiBuyPullback) || (low1 <= emaPull[1]);
-      // Confirmacion de momentum: vela de senal alcista y RSI girando al alza
-      bool momentum = (!InpRequireMomentum) || (close1 > close2 && rsi[1] > rsi[2]);
-      if(pullback && momentum)
+      // 1) Pullback real: RSI en zona de retroceso
+      bool cPullback = (rsi[1] < InpRsiBuyPullback);
+      // 2) Proximidad: el minimo se acerco a la EMA dinamica (dentro de X*ATR)
+      bool cProximity = (low1 <= emaPull[1] + InpEntryProxATR * atrVal);
+      // 3) No sobre-extension: el cierre no esta demasiado lejos de la EMA
+      bool cExtension = (!InpUseOverextension) || ((close1 - emaPull[1]) <= InpMaxExtensionATR * atrVal);
+      // 4) Trigger de momentum: vela alcista y RSI girando al alza
+      bool cMomentum = (close1 > open1) && (close1 > close2) && (rsi[1] > rsi[2]);
+      // 5) Cuerpo fuerte: cierre en la parte alta del rango
+      bool cCandle = (!InpUseCandleFilter) || ((close1 - low1) >= InpCandleBodyFrac * range);
+
+      if(cPullback && cProximity && cExtension && cMomentum && cCandle)
          return(+1);
    }
+   // ---- CONFLUENCIA de venta ----
    else if(downTrend)
    {
-      bool pullback = (rsi[1] > InpRsiSellPullback) || (high1 >= emaPull[1]);
-      bool momentum = (!InpRequireMomentum) || (close1 < close2 && rsi[1] < rsi[2]);
-      if(pullback && momentum)
+      bool cPullback  = (rsi[1] > InpRsiSellPullback);
+      bool cProximity = (high1 >= emaPull[1] - InpEntryProxATR * atrVal);
+      bool cExtension = (!InpUseOverextension) || ((emaPull[1] - close1) <= InpMaxExtensionATR * atrVal);
+      bool cMomentum  = (close1 < open1) && (close1 < close2) && (rsi[1] < rsi[2]);
+      bool cCandle    = (!InpUseCandleFilter) || ((high1 - close1) >= InpCandleBodyFrac * range);
+
+      if(cPullback && cProximity && cExtension && cMomentum && cCandle)
          return(-1);
    }
 
@@ -295,19 +357,17 @@ int GetSignal()
 }
 
 //+------------------------------------------------------------------+
-//| Abre una operacion con SL/TP por ATR y sizing por riesgo         |
-//+------------------------------------------------------------------+
 void OpenTrade(int signal)
 {
-   double atr[1];
-   if(CopyBuffer(hAtrE, 0, 0, 1, atr) < 1) return;
-   double atrVal = atr[0];
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(hAtrE, 0, 0, 2, atr) < 2) return;
+   double atrVal = atr[1];
    if(atrVal <= 0) return;
 
-   double slDistance = InpSlAtrMult * atrVal;        // distancia del SL en precio
-   double tpDistance = InpTpRR * slDistance;          // TP por ratio riesgo/beneficio
+   double slDistance = InpSlAtrMult * atrVal;
+   double tpDistance = InpTpRR * slDistance;
 
-   // Respetar distancia minima del broker (stops level)
    double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
    if(slDistance < minStop) slDistance = minStop * 1.5;
    if(tpDistance < minStop) tpDistance = minStop * 1.5;
@@ -332,24 +392,15 @@ void OpenTrade(int signal)
    double lots = CalcLotSize(slDistance);
    if(lots <= 0) return;
 
-   bool ok = false;
-   if(signal > 0)
-      ok = trade.Buy(lots, _Symbol, price, sl, tp, InpComment);
-   else
-      ok = trade.Sell(lots, _Symbol, price, sl, tp, InpComment);
+   bool ok = (signal > 0) ? trade.Buy(lots, _Symbol, price, sl, tp, InpComment)
+                          : trade.Sell(lots, _Symbol, price, sl, tp, InpComment);
 
    if(ok)
-   {
       g_tradesToday++;
-   }
    else
-   {
       PrintFormat("Fallo al abrir orden. retcode=%d (%s)", trade.ResultRetcode(), trade.ResultRetcodeDescription());
-   }
 }
 
-//+------------------------------------------------------------------+
-//| Calculo del tamano de lote segun riesgo % y distancia de SL      |
 //+------------------------------------------------------------------+
 double CalcLotSize(double slDistancePrice)
 {
@@ -358,11 +409,7 @@ double CalcLotSize(double slDistancePrice)
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
    if(!InpUseRiskPercent)
-   {
-      double lot = InpFixedLot;
-      lot = MathMax(minLot, MathMin(maxLot, lot));
-      return(NormalizeLot(lot, lotStep, minLot, maxLot));
-   }
+      return(NormalizeLot(InpFixedLot, lotStep, minLot, maxLot));
 
    double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskMoney = balance * (InpRiskPercent / 100.0);
@@ -372,13 +419,28 @@ double CalcLotSize(double slDistancePrice)
    if(tickSize <= 0 || tickValue <= 0)
       return(NormalizeLot(InpFixedLot, lotStep, minLot, maxLot));
 
-   // Perdida por lote si se toca el SL
    double lossPerLot = (slDistancePrice / tickSize) * tickValue;
    if(lossPerLot <= 0)
       return(NormalizeLot(InpFixedLot, lotStep, minLot, maxLot));
 
    double lots = riskMoney / lossPerLot;
-   return(NormalizeLot(lots, lotStep, minLot, maxLot));
+   lots = NormalizeLot(lots, lotStep, minLot, maxLot);
+
+   // Validacion de margen: reduce el lote si no hay margen suficiente
+   double marginReq = 0.0;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lots, ask, marginReq))
+   {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      while(lots > minLot && marginReq > freeMargin * 0.9)
+      {
+         lots = NormalizeLot(lots - lotStep, lotStep, minLot, maxLot);
+         if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lots, ask, marginReq))
+            break;
+      }
+   }
+
+   return(lots);
 }
 
 double NormalizeLot(double lots, double step, double minLot, double maxLot)
@@ -386,22 +448,26 @@ double NormalizeLot(double lots, double step, double minLot, double maxLot)
    if(step <= 0) step = 0.01;
    lots = MathFloor(lots / step) * step;
    lots = MathMax(minLot, MathMin(maxLot, lots));
-   // redondeo a la precision del step
    int lotDigits = (int)MathRound(-MathLog10(step));
    if(lotDigits < 0) lotDigits = 2;
    return(NormalizeDouble(lots, lotDigits));
 }
 
 //+------------------------------------------------------------------+
-//| Gestion de posiciones abiertas: break-even y trailing            |
+//| Gestion: parciales, break-even y trailing usando riesgo estable  |
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
-   if(!InpUseBreakEven && !InpUseTrailing)
+   if(!InpUsePartial && !InpUseBreakEven && !InpUseTrailing)
       return;
 
-   double atr[1];
-   bool atrOk = (CopyBuffer(hAtrE, 0, 0, 1, atr) >= 1 && atr[0] > 0);
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   bool atrOk = (CopyBuffer(hAtrE, 0, 0, 2, atr) >= 2 && atr[1] > 0);
+   double atrVal = atrOk ? atr[1] : 0.0;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    for(int i = PositionsTotal()-1; i >= 0; i--)
    {
@@ -411,66 +477,142 @@ void ManageOpenPositions()
       if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
 
-      long   type     = PositionGetInteger(POSITION_TYPE);
-      double openP    = PositionGetDouble(POSITION_PRICE_OPEN);
-      double curSL    = PositionGetDouble(POSITION_SL);
-      double curTP    = PositionGetDouble(POSITION_TP);
-      double bid      = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask      = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      int idx = FindPosState(ticket);
+      if(idx < 0) continue; // se registra en SyncPositionStates
 
-      // Distancia de riesgo inicial (open -> SL). Si no hay SL usamos ATR.
-      double riskDist = MathAbs(openP - curSL);
-      if(riskDist <= 0 && atrOk)
-         riskDist = InpSlAtrMult * atr[0];
+      long   type  = PositionGetInteger(POSITION_TYPE);
+      double openP = g_pos[idx].openPrice;
+      double curSL = PositionGetDouble(POSITION_SL);
+      double curTP = PositionGetDouble(POSITION_TP);
+      double riskDist = g_pos[idx].riskDist;
       if(riskDist <= 0) continue;
 
+      double profitDist = (type == POSITION_TYPE_BUY) ? (bid - openP) : (openP - ask);
+      double rMultiple  = profitDist / riskDist;
+
+      // ----- Salida parcial -----
+      if(InpUsePartial && !g_pos[idx].partialDone && rMultiple >= InpPartialAtR)
+      {
+         double closeVol = NormalizeClose(g_pos[idx].initialVolume * (InpPartialPercent/100.0));
+         double remaining = PositionGetDouble(POSITION_VOLUME) - closeVol;
+         double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         if(closeVol >= minLot && remaining >= minLot)
+         {
+            if(trade.PositionClosePartial(ticket, closeVol))
+               g_pos[idx].partialDone = true;
+         }
+         else
+         {
+            g_pos[idx].partialDone = true; // no se puede partir mas; marcamos hecho
+         }
+      }
+
+      // Recalcular SL deseado
       double newSL = curSL;
 
       if(type == POSITION_TYPE_BUY)
       {
-         double profitDist = bid - openP;
-         double rMultiple  = profitDist / riskDist;
-
-         // Break-even
-         if(InpUseBreakEven && rMultiple >= InpBreakEvenAtR)
+         bool wantBE = (InpUseBreakEven && rMultiple >= InpBreakEvenAtR) ||
+                       (InpBEAfterPartial && g_pos[idx].partialDone);
+         if(wantBE)
          {
             double be = NormalizeDouble(openP + InpBreakEvenLockPts * g_point, g_digits);
             if(be > newSL) newSL = be;
+            g_pos[idx].beDone = true;
          }
-         // Trailing
          if(InpUseTrailing && atrOk && rMultiple >= InpTrailStartAtR)
          {
-            double trail = NormalizeDouble(bid - InpTrailAtrMult * atr[0], g_digits);
+            double trail = NormalizeDouble(bid - InpTrailAtrMult * atrVal, g_digits);
             if(trail > newSL) newSL = trail;
          }
-
          if(newSL > curSL && newSL < bid)
             trade.PositionModify(ticket, newSL, curTP);
       }
-      else if(type == POSITION_TYPE_SELL)
+      else // SELL
       {
-         double profitDist = openP - ask;
-         double rMultiple  = profitDist / riskDist;
-
-         if(InpUseBreakEven && rMultiple >= InpBreakEvenAtR)
+         bool wantBE = (InpUseBreakEven && rMultiple >= InpBreakEvenAtR) ||
+                       (InpBEAfterPartial && g_pos[idx].partialDone);
+         if(wantBE)
          {
             double be = NormalizeDouble(openP - InpBreakEvenLockPts * g_point, g_digits);
-            if(curSL == 0 || be < newSL) newSL = be;
+            if(curSL == 0.0 || be < newSL) newSL = be;
+            g_pos[idx].beDone = true;
          }
          if(InpUseTrailing && atrOk && rMultiple >= InpTrailStartAtR)
          {
-            double trail = NormalizeDouble(ask + InpTrailAtrMult * atr[0], g_digits);
-            if(curSL == 0 || trail < newSL) newSL = trail;
+            double trail = NormalizeDouble(ask + InpTrailAtrMult * atrVal, g_digits);
+            if(curSL == 0.0 || trail < newSL) newSL = trail;
          }
-
-         if((curSL == 0 || newSL < curSL) && newSL > ask)
+         if((curSL == 0.0 || newSL < curSL) && newSL > ask)
             trade.PositionModify(ticket, newSL, curTP);
       }
    }
 }
 
+double NormalizeClose(double vol)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   return(NormalizeLot(vol, lotStep, minLot, maxLot));
+}
+
 //+------------------------------------------------------------------+
-//| Cuenta posiciones propias (mismo magic y simbolo)                |
+//| Sincroniza el estado por posicion (registra nuevas, limpia viejas)|
+//+------------------------------------------------------------------+
+void SyncPositionStates()
+{
+   // Eliminar estados de posiciones que ya no existen
+   for(int i = ArraySize(g_pos)-1; i >= 0; i--)
+   {
+      if(!PositionSelectByTicket(g_pos[i].ticket))
+         RemovePosStateAt(i);
+   }
+
+   // Registrar posiciones propias nuevas
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      if(FindPosState(ticket) >= 0) continue;
+
+      double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double vol   = PositionGetDouble(POSITION_VOLUME);
+      double risk  = (sl > 0.0) ? MathAbs(openP - sl) : 0.0;
+
+      int n = ArraySize(g_pos);
+      ArrayResize(g_pos, n+1);
+      g_pos[n].ticket        = ticket;
+      g_pos[n].openPrice     = openP;
+      g_pos[n].riskDist      = risk;
+      g_pos[n].initialVolume = vol;
+      g_pos[n].partialDone   = false;
+      g_pos[n].beDone        = false;
+   }
+}
+
+int FindPosState(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(g_pos); i++)
+      if(g_pos[i].ticket == ticket)
+         return(i);
+   return(-1);
+}
+
+void RemovePosStateAt(int idx)
+{
+   int n = ArraySize(g_pos);
+   if(idx < 0 || idx >= n) return;
+   for(int i = idx; i < n-1; i++)
+      g_pos[i] = g_pos[i+1];
+   ArrayResize(g_pos, n-1);
+}
+
 //+------------------------------------------------------------------+
 int CountOwnPositions()
 {
@@ -488,8 +630,6 @@ int CountOwnPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Control de cambio de dia y limite de perdida diaria              |
-//+------------------------------------------------------------------+
 void HandleNewDay()
 {
    MqlDateTime dt;
@@ -502,13 +642,12 @@ void HandleNewDay()
       ResetDailyCounters();
    }
 
-   // Evaluar limite de perdida diaria
    if(InpUseDailyLossLimit && !g_tradingBlockedToday)
    {
       double equity = AccountInfoDouble(ACCOUNT_EQUITY);
       double dayLoss = g_dayStartEquity - equity;
       double maxLoss = g_dayStartEquity * (InpDailyLossPercent / 100.0);
-      if(dayLoss >= maxLoss && maxLoss > 0)
+      if(maxLoss > 0 && dayLoss >= maxLoss)
       {
          g_tradingBlockedToday = true;
          PrintFormat("Limite de perdida diaria alcanzado (%.2f). Trading bloqueado hoy.", dayLoss);
@@ -518,8 +657,8 @@ void HandleNewDay()
 
 void ResetDailyCounters()
 {
-   g_dayStartEquity        = AccountInfoDouble(ACCOUNT_EQUITY);
-   g_tradesToday           = 0;
-   g_tradingBlockedToday   = false;
+   g_dayStartEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_tradesToday         = 0;
+   g_tradingBlockedToday = false;
 }
 //+------------------------------------------------------------------+
